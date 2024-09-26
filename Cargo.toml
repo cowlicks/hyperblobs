@@ -7,6 +7,15 @@ edition = "2021"
 derive_builder = "0.20.1"
 thiserror = "1.0.63"
 tracing = "0.1.40"
+# TODO rm unused features
+tokio = { version = "1.37.0", features = ["full"] }
 
 [dependencies.hypercore]
-path = "../core"
+#path = "../../core"
+git = "https://github.com/cowlicks/hypercore.git"
+rev = "29f0a199861d06dee701413f473a43acbcfdff4f"
+
+[dependencies.replicator]
+#path = "../replicator/replicator"
+git = "https://github.com/cowlicks/replicator.git"
+rev = "9a8ea4c02f6bc7b7479ceafbe0bb13bd5389f061"
