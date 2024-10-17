@@ -1,15 +1,14 @@
 /*!
 Store binary blobs with hypercore. Inspired by the [JavaScript implementation](https://github.com/holepunchto/hyperblobs).
 ```rust
-# use rust::add;
-assert_eq!(add(1, 2), 3);
+# println!("This line not shown in the blocks");
+println!("This line is");
 ```
 */
 #![warn(
     missing_debug_implementations,
     missing_docs,
     redundant_lifetimes,
-    non_local_definitions,
     unsafe_code,
     non_local_definitions
 )]
@@ -35,21 +34,11 @@ type Result<T> = std::result::Result<T, Error>;
 /// Options for [`Hyperblobs::put`]
 #[derive(Debug, Clone, Default, Builder)]
 pub struct PutOptions {
-    /// The block size that will be used when storing blobs.
-    /// TODO What happens when this conflicts with [`HyperblobsBuilder::block_size`]
-    #[builder(default = "Some(DEFAULT_BLOCK_SIZE)")]
-    pub block_size: Option<u64>,
-    // TODO these just seem to be various ways to represent a range
-    // remove them for now. Experiment with js and see what happens when
-    // - end & length conflict
     /// Relative offset to start within the blob
     pub start: Option<u64>,
     /// number of bytes to read
     pub length: Option<u64>,
-    /*
-    /// End offset within the blob
-    pub end: u64,
-    */
+    // We omit the `end` and `block_size` options that JS has.
 }
 
 /// Options for [`Hyperblobs::get`].
@@ -118,27 +107,26 @@ pub struct Hyperblobs {
     core: ReplicatingCore,
 }
 
-fn u64_from_usize(x: usize) -> u64 {
-    u64::try_from(x).expect("TODO")
+impl HyperblobsBuilder {
+    //fn storage(&mut self, store: Storage)
 }
 
 impl Hyperblobs {
     /// Insert a blob into the store
     #[instrument]
     pub async fn put(&self, blob: &[u8], _opts: &PutOptions) -> Result<PutBlob> {
-        let byte_length = u64_from_usize(blob.len());
-
         let blocks: Vec<Vec<u8>> = blob
-            .chunks(self.block_size.try_into().expect("TODO"))
+            .chunks(self.block_size as usize)
             .map(Vec::from)
             .collect();
 
-        let block_length = u64_from_usize(blocks.len());
+        let byte_length = blob.len() as u64;
+        let block_length = blocks.len() as u64;
 
         let res = self.core.append_batch(&blocks).await?;
 
         let out = PutBlob {
-            byte_offset: res.byte_length - u64::try_from(byte_length).expect("TODO"),
+            byte_offset: res.byte_length - byte_length,
             block_offset: res.length - block_length,
             block_length,
             byte_length,
@@ -147,16 +135,6 @@ impl Hyperblobs {
     }
 
     /// Get a blob from the store
-    /// TODO what happens when the data in BlobId conflicts with itself? like the byte_length
-    /// doesn't match the block_length?
-    /// * what should happen when bid.block_offset > core.info().length
-    /// * what about when bid.block_offset < cor.length but block_offset + block length >
-    /// core.length
-    /// * what about when byte_length doesn't match the blocks?
-    ///   greater than? less than?
-    /// Answer: it looks like only consider block_offset and byte_length
-    /// looking at the code, block_offset is just used for prefetching
-    /// byte_offset (without opts.start/end
     #[instrument]
     pub async fn get<T: Into<GetBlob> + std::fmt::Debug>(
         &self,
@@ -169,20 +147,19 @@ impl Hyperblobs {
         } = id.into();
         let mut out = vec![];
         let n_blocks = byte_length.div_ceil(self.block_size);
-        dbg!();
-        for bi in block_offset..(block_offset + n_blocks) {
-            match self.core.get(bi).await? {
-                // TODO how should we handle this
-                None => break,
+        for block_index in block_offset..(block_offset + n_blocks) {
+            match self.core.get(block_index).await? {
+                None => todo!("How to handle this?"),
                 Some(block) => {
-                    dbg!(bi);
-                    if bi == block_offset + n_blocks - 1 {
-                        dbg!(self.block_size);
-                        let x = byte_length.rem(self.block_size);
-                        dbg!(&x);
-                        let x = usize::try_from(x).expect("TODO");
-                        dbg!(&x);
-                        out.extend_from_slice(&block[..x]);
+                    // if last block
+                    if block_index == block_offset + n_blocks - 1 {
+                        // only take up to the requested byte length
+                        let rem = byte_length.rem(self.block_size);
+                        if rem != 0 {
+                            out.extend_from_slice(&block[..(rem as usize)]);
+                        }  else {
+                            out.extend(block);
+                        }
                     } else {
                         out.extend(block);
                     }
@@ -242,12 +219,38 @@ mod tests {
         assert_eq!(res, b"Hello");
 
         let data2 = b"More data!!!!?";
-        let id = blobs.put(data2, &Default::default()).await?;
-        dbg!(&id);
-        let res = blobs.get(&id, &Default::default()).await?;
+        let id2 = blobs.put(data2, &Default::default()).await?;
+        assert_eq!(id2.byte_offset, id.byte_length);
+        assert_eq!(id2.block_offset, id.block_length);
+        assert_eq!(id2.block_length, data2.len().div_ceil(2) as u64);
+        dbg!(id2.block_length);
+        assert_eq!(id2.byte_length, data2.len() as u64);
+        dbg!(&id2);
+        let res = blobs.get(&id2, &Default::default()).await?;
         println!("{}", String::from_utf8_lossy(&res));
         assert_eq!(res, data2);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn remainders() -> Result<()> {
+        let blobs = ram_blobs(3).await;
+
+        let data = b"abcefg";
+        let id = blobs.put(data, &Default::default()).await?;
+        let res = blobs.get(&id, &Default::default()).await?;
+        assert_eq!(res, data);
+
+        let data = b"abcef";
+        let id = blobs.put(data, &Default::default()).await?;
+        let res = blobs.get(&id, &Default::default()).await?;
+        assert_eq!(res, data);
+
+        let data = b"abce";
+        let id = blobs.put(data, &Default::default()).await?;
+        let res = blobs.get(&id, &Default::default()).await?;
+        assert_eq!(res, data);
         Ok(())
     }
 }
